@@ -1,0 +1,43 @@
+static void Main(string[] args)
+{           
+    SqlConnection source = new SqlConnection();
+    SqlConnection dest = new SqlConnection();
+            
+    source.Open();
+    dest.Open();
+
+    SqlCommand sourceCommand = new SqlCommand(@"
+          select top 50000
+              SalesOrderID, SalesOrderDetailID,
+              CarrierTrackingNumber, OrderQty, ProductID,
+              SpecialOfferID, UnitPrice, UnitPriceDiscount, LineTotal, ModifiedDate 
+          from 
+              Sales.SalesOrderDetail", source);
+
+    // ensure that our destination table is empty:
+    new SqlCommand("delete from SalesCopy", dest).ExecuteNonQuery();
+
+    DateTime start = DateTime.Now;
+    Console.WriteLine("Beginning Copy ....");
+
+    // using SqlDataReader to copy the rows:
+    using (SqlDataReader dr = sourceCommand.ExecuteReader())
+    {
+        using (SqlBulkCopy s = new SqlBulkCopy(dest))
+        {
+            s.DestinationTableName = "SalesCopy";
+            s.NotifyAfter = 10000;
+            s.SqlRowsCopied += new SqlRowsCopiedEventHandler(s_SqlRowsCopied);
+            s.WriteToServer(dr);
+            s.Close();
+        }
+    }
+
+    Console.WriteLine("Copy complete in {0}  seconds.", DateTime.Now.Subtract(start).Seconds);
+    Console.ReadLine();
+
+    // close connections:
+
+    source.Close();
+    dest.Close();
+}
