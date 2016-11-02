@@ -16,13 +16,15 @@ namespace BatchTableImport
 {
     class Program
     {
-        static BlockingCollection<DataTable> pcCollection = new BlockingCollection<DataTable>();
+        static BlockingCollection<int> pcCollection = new BlockingCollection<int>();
         static string strRemoteConn = ConfigurationManager.AppSettings["RemoteConnStr"];
         static string strLocalConn = ConfigurationManager.AppSettings["LocalConnStr"];
         static string strCommandSql = ConfigurationManager.AppSettings["CommandSQL"];
         static string strTableName = ConfigurationManager.AppSettings["TableName"];
         static int batchSize = Int32.Parse(ConfigurationManager.AppSettings["CommitBatchSize"]);
         static int taskCount = Int32.Parse(ConfigurationManager.AppSettings["TaskCount"]);
+
+        static object s_consumer = new object();
 
         static void Main(string[] args)
         {
@@ -56,7 +58,7 @@ namespace BatchTableImport
                 var listProducerTask = new List<Task>();
                 var listConsumerTask = new List<Task>();
 
-                var consumerTask = taskCount / 2;
+                var consumerTask = taskCount;
 
                 for (int i = 1; i <= consumerTask; i++)
                 {
@@ -64,6 +66,7 @@ namespace BatchTableImport
                     var consumer = Task.Factory.StartNew(() =>
                     {
                         ConsumerAction(taskFlag.ToString());
+
                     }, TaskCreationOptions.LongRunning);
 
                     listConsumerTask.Add(consumer);
@@ -84,21 +87,11 @@ namespace BatchTableImport
 
                 Task.WaitAll(listProducerTask.ToArray());
                 pcCollection.CompleteAdding();
+                Task.WaitAll(listConsumerTask.ToArray());
 
                 watch.Stop();
                 var mins = watch.ElapsedMilliseconds / 1000 / 60;
                 Console.WriteLine("All Batch Insert Time Elapsed:\t {0} mins", mins);
-
-                //Task.Factory.ContinueWhenAll(listProducerTask.ToArray(),
-                //     result =>
-                //     {
-                //         pcCollection.CompleteAdding();
-
-                //         watch.Stop();
-                //         var mins = watch.ElapsedMilliseconds / 1000 / 60;
-                //         Console.WriteLine("All Batch Insert Time Elapsed:\t {0} mins", mins);
-
-                //     });
             }
             catch (AggregateException ex)
             {
@@ -136,15 +129,7 @@ namespace BatchTableImport
             {
                 Console.WriteLine("Producer-{0} processing item batch {1}", taskFlag, item);
 
-                var processing = new ManageBatchProcessing
-                {
-                    LocalConnStr = strLocalConn,
-                    RemoteConnStr = strRemoteConn,
-                    BatchSize = batchSize,
-                    TableName = strTableName,
-                    CommandSql = strCommandSql
-                };
-                pcCollection.Add(processing.RetriveToDatabase(item));
+                pcCollection.Add(item);
             }
         }
 
@@ -152,7 +137,7 @@ namespace BatchTableImport
         {
             foreach (var item in pcCollection.GetConsumingEnumerable())
             {
-                Console.WriteLine("consumer-{0} processing item {1}", taskFlag, item.Rows.Count);
+                Console.WriteLine("consumer-{0} processing item", taskFlag);
                 var processing = new ManageBatchProcessing
                 {
                     LocalConnStr = strLocalConn,
@@ -161,7 +146,8 @@ namespace BatchTableImport
                     TableName = strTableName,
                     CommandSql = strCommandSql
                 };
-                processing.WriteToDatabase(item);
+
+                processing.ProcessDatabase(item);
             }
         }
 
