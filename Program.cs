@@ -16,14 +16,17 @@ namespace BatchTableImport
 {
     class Program
     {
-        static BlockingCollection<int> pcCollection = new BlockingCollection<int>();
+        static BlockingCollection<int> pcCollection = new BlockingCollection<int>(5000);
         static string strRemoteConn = ConfigurationManager.AppSettings["RemoteConnStr"];
         static string strLocalConn = ConfigurationManager.AppSettings["LocalConnStr"];
         static string strCommandSql = ConfigurationManager.AppSettings["CommandSQL"];
         static string strTableName = ConfigurationManager.AppSettings["TableName"];
         static int batchSize = Int32.Parse(ConfigurationManager.AppSettings["CommitBatchSize"]);
         static int taskCount = Int32.Parse(ConfigurationManager.AppSettings["TaskCount"]);
+        static int timeOut = Int32.Parse(ConfigurationManager.AppSettings["TimeOut"]);
 
+
+        static string strColumns = string.Empty;
         static object s_consumer = new object();
 
         static void Main(string[] args)
@@ -32,22 +35,9 @@ namespace BatchTableImport
             {
                 var watch = Stopwatch.StartNew();
 
-                var tableCount = 0D;
+                var tableCount = GetTableCount();
 
-                using (var connection = new SqlConnection(strRemoteConn))
-                using (SqlCommand cmd = connection.CreateCommand())
-                {
-                    connection.Open();
-                    cmd.CommandText = string.Format(@"SELECT
-                                                        Total_Rows= SUM(st.row_count)
-                                                    FROM
-                                                        sys.dm_db_partition_stats st
-                                                    WHERE
-                                                        object_name(object_id) = '{0}' AND (index_id < 2)", strTableName);
-                    cmd.CommandTimeout = 300;
-
-                    tableCount = Double.Parse(cmd.ExecuteScalar().ToString());
-                }
+                strColumns = GetTableColumns();
 
                 var totalPages = (int)Math.Ceiling(tableCount / batchSize);
 
@@ -65,7 +55,7 @@ namespace BatchTableImport
                     var taskFlag = i;
                     var consumer = Task.Factory.StartNew(() =>
                     {
-                        ConsumerAction(taskFlag.ToString());
+                        ConsumerAction(taskFlag.ToString("D2"));
 
                     }, TaskCreationOptions.LongRunning);
 
@@ -75,7 +65,7 @@ namespace BatchTableImport
                 var producerTaskIndex = 1;
                 foreach (var item in listPartPage)
                 {
-                    var tmpIndex = producerTaskIndex.ToString();
+                    var tmpIndex = producerTaskIndex.ToString("D2");
                     var producer = Task.Factory.StartNew(() =>
                     {
                         ProducerAction(item, tmpIndex);
@@ -92,6 +82,7 @@ namespace BatchTableImport
                 watch.Stop();
                 var mins = watch.ElapsedMilliseconds / 1000 / 60;
                 Console.WriteLine("All Batch Insert Time Elapsed:\t {0} mins", mins);
+                Console.WriteLine("Total rows are inserted:\t {0}", tableCount);
             }
             catch (AggregateException ex)
             {
@@ -123,6 +114,58 @@ namespace BatchTableImport
             Console.ReadLine();
         }
 
+
+        static double GetTableCount()
+        {
+            var totalCount = 0D;
+            using (var connection = new SqlConnection(strRemoteConn))
+            using (SqlCommand cmd = connection.CreateCommand())
+            {
+                connection.Open();
+                cmd.CommandText = string.Format(@"SELECT
+                                                        Total_Rows= SUM(st.row_count)
+                                                    FROM
+                                                        sys.dm_db_partition_stats st
+                                                    WHERE
+                                                        object_name(object_id) = '{0}' AND (index_id < 2)", strTableName);
+                cmd.CommandTimeout = 300;
+
+                if (!Double.TryParse(cmd.ExecuteScalar().ToString(), out totalCount))
+                {
+                    throw new Exception("please check database!");
+                }
+
+                return totalCount;
+            }
+        }
+
+        static string GetTableColumns()
+        {
+            var listColumns = new List<string>();
+            using (var connection = new SqlConnection(strRemoteConn))
+            using (SqlCommand cmd = connection.CreateCommand())
+            {
+                connection.Open();
+                cmd.CommandText = string.Format(@"SELECT Column_Name
+                                                FROM Information_Schema.Columns
+                                                WHERE Table_Name = '{0}'
+                                                ORDER BY Ordinal_Position
+                                                ", strTableName);
+                cmd.CommandTimeout = 300;
+
+                using (var dataReader = cmd.ExecuteReader())
+                {
+                    while (dataReader.Read())
+                    {
+                        listColumns.Add(dataReader.GetValue(0).ToString());
+                    }
+                }
+
+            }
+
+            return string.Join(",", listColumns);
+        }
+
         static void ProducerAction(IEnumerable<int> source, string taskFlag = "1")
         {
             foreach (var item in source)
@@ -135,19 +178,21 @@ namespace BatchTableImport
 
         static void ConsumerAction(string taskFlag = "")
         {
+
+
             foreach (var item in pcCollection.GetConsumingEnumerable())
             {
-                Console.WriteLine("consumer-{0} processing item", taskFlag);
                 var processing = new ManageBatchProcessing
                 {
                     LocalConnStr = strLocalConn,
                     RemoteConnStr = strRemoteConn,
                     BatchSize = batchSize,
                     TableName = strTableName,
-                    CommandSql = strCommandSql
+                    CommandSql = strCommandSql,
+                    TimeOut = timeOut,
+                    ColumnNames = strColumns
                 };
-
-                processing.ProcessDatabase(item);
+                processing.ProcessDatabase(taskFlag, item);
             }
         }
 
